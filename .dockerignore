@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+data/
+backups/
+*.dump
+postgres_url.txt
+.streamlit/secrets.toml
+*.bat
+docs/*.docx
+tools/cloudflared.exe
