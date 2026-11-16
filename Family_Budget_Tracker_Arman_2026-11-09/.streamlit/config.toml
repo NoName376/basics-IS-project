@@ -1,0 +1,16 @@
+[theme]
+base = "light"
+primaryColor = "#0F766E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F9FAFB"
+textColor = "#101828"
+font = "sans serif"
+
+[server]
+headless = true
+# Same limit as the business rule in core/services.py (10 MB), so the file
+# never travels to the server just to be rejected by validate_receipt.
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false

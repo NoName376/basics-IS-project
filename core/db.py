@@ -11,6 +11,7 @@ never as a float, so no rounding error can enter a balance.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -31,6 +32,10 @@ class Database:
         self.database_url = (database_url or "").strip() or None
         self.dialect = "postgres" if self.database_url else "sqlite"
         self.sqlite_path = Path(sqlite_path or "data/family_budget.db")
+        # One PostgreSQL connection per thread. Opening a new TLS connection for
+        # every statement costs 300-500 ms against a remote server (Supabase),
+        # which made every screen slow.
+        self._local = threading.local()
 
         if self.dialect == "postgres" and psycopg2 is None:
             raise DatabaseError(
@@ -46,8 +51,11 @@ class Database:
     def _connect(self) -> Any:
         try:
             if self.dialect == "postgres":
-                conn = psycopg2.connect(self.database_url, connect_timeout=5)
+                conn = psycopg2.connect(self.database_url, connect_timeout=8)
                 conn.cursor_factory = psycopg2.extras.RealDictCursor
+                # Autocommit keeps the pooled connection out of "idle in transaction":
+                # reads see the latest committed data and no locks are held.
+                conn.autocommit = True
                 return conn
             self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.sqlite_path, timeout=15)
@@ -63,11 +71,36 @@ class Database:
 
     @contextmanager
     def connection(self) -> Iterator[Any]:
-        conn = self._connect()
+        if self.dialect == "sqlite":
+            conn = self._connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
+
+        conn = getattr(self._local, "conn", None)
+        if conn is None or conn.closed:
+            conn = self._connect()
+            self._local.conn = conn
         try:
             yield conn
-        finally:
-            conn.close()
+        except Exception:
+            # A broken connection must not poison every later query.
+            self._local.conn = None
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+    def close(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            finally:
+                self._local.conn = None
 
     # --------------------------------------------------------------- queries
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:

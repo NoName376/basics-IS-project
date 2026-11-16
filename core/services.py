@@ -41,6 +41,10 @@ DEFAULT_CATEGORIES: list[tuple[str, str, int | None]] = [
 BUDGET_WARNING_PERCENT = 80
 VALID_ROLES = ("admin", "member")
 
+# Receipts follow Alibek's design: JPEG, PNG or PDF, up to 10 MB.
+MAX_RECEIPT_BYTES = 10 * 1024 * 1024
+ALLOWED_RECEIPT_TYPES = ("image/jpeg", "image/png", "application/pdf")
+
 
 class AppError(Exception):
     """Base class for expected, user-facing errors."""
@@ -350,6 +354,54 @@ class BudgetService:
             raise AccessDenied("You can delete only your own transactions.")
         self.db.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
 
+    # --------------------------------------------------------------- receipts
+    def validate_receipt(self, content_type: str | None, file_size: int, original_name: str = "") -> int:
+        """Check the file before anything is written to disk."""
+        if content_type not in ALLOWED_RECEIPT_TYPES:
+            raise ValidationError("A receipt must be a JPEG, PNG or PDF file.", "receipt")
+        try:
+            size = int(file_size)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("The receipt file is not readable.", "receipt") from exc
+        if size <= 0:
+            raise ValidationError("The receipt file is empty.", "receipt")
+        if size > MAX_RECEIPT_BYTES:
+            raise ValidationError("A receipt must be smaller than 10 MB.", "receipt")
+        if original_name and len(original_name) > 255:
+            raise ValidationError("The file name is too long.", "receipt")
+        return size
+
+    def add_receipt(
+        self,
+        actor: dict[str, Any],
+        transaction_id: int,
+        original_name: str,
+        stored_name: str,
+        content_type: str,
+        file_size: int,
+    ) -> int:
+        actor = self._fresh(actor)
+        size = self.validate_receipt(content_type, file_size, original_name)
+        row = self.db.query_one(
+            "SELECT id FROM transactions WHERE id = ? AND family_id = ?",
+            (transaction_id, actor["family_id"]),
+        )
+        if not row:
+            raise NotFound("Transaction not found in your family.")
+        return self.db.insert(
+            "INSERT INTO receipts (transaction_id, family_id, uploaded_by, original_name, stored_name, "
+            "content_type, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (transaction_id, actor["family_id"], actor["id"], original_name, stored_name, content_type, size),
+        )
+
+    def receipts_for(self, family_id: int, transaction_id: int) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT r.* FROM receipts r JOIN transactions t ON t.id = r.transaction_id "
+            "WHERE r.transaction_id = ? AND t.family_id = ? ORDER BY r.id DESC",
+            (transaction_id, family_id),
+        )
+        return [dict(row) for row in rows]
+
     def list_transactions(
         self,
         family_id: int,
@@ -364,7 +416,8 @@ class BudgetService:
         sql = [
             "SELECT t.id, t.kind, t.amount_cents, t.occurred_on, t.note, t.created_at,",
             "       c.name AS category, c.id AS category_id,",
-            "       u.full_name AS member, u.id AS user_id",
+            "       u.full_name AS member, u.id AS user_id,",
+            "       EXISTS (SELECT 1 FROM receipts r WHERE r.transaction_id = t.id) AS has_receipt",
             "FROM transactions t",
             "JOIN categories c ON c.id = t.category_id",
             "JOIN users u ON u.id = t.user_id",

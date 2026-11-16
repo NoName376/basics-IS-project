@@ -32,7 +32,7 @@ Windows, one click (installs everything on the first run):
 START.bat
 ```
 
-`CHECK.bat` runs the 34 unit tests and the 10 end-to-end checks — use it before the lesson.
+`CHECK.bat` runs the 43 unit tests and the 10 end-to-end checks — use it before the lesson.
 
 Manual way:
 
@@ -109,7 +109,7 @@ docs/
   ALIBEK_INTEGRATION_RU.md  schema differences, connection string, migration plan
   TEAM_REQUESTS_RU.md   ready-to-send messages to Alibek and Abu
   DEMO_SCENARIO_RU.md   what to click and say at the weekly check
-tests/test_core.py      34 unit tests
+tests/test_core.py      43 unit tests
 selfcheck.py            10 end-to-end checks of the data path
 seed_demo.py            demo family generator
 ```
@@ -166,7 +166,7 @@ Not done yet (next iteration): TLS termination, database backups, audit log of d
 ## 8. Tests
 
 ```bat
-python -m unittest discover -s tests -v   :: 34 tests
+python -m unittest discover -s tests -v   :: 43 tests
 python selfcheck.py                       :: 10 end-to-end checks
 python tools/abu_conformance.py           :: Abu's 9 defects, re-checked here
 python tools/db_check.py                  :: database matches the schema contract

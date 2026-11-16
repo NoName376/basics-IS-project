@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Same receipt table as in schema_postgres.sql (Alibek's design).
+CREATE TABLE IF NOT EXISTS receipts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id INTEGER NOT NULL REFERENCES transactions (id) ON DELETE CASCADE,
+    family_id      INTEGER NOT NULL REFERENCES families (id) ON DELETE CASCADE,
+    uploaded_by    INTEGER NOT NULL REFERENCES users (id),
+    original_name  TEXT    NOT NULL,
+    stored_name    TEXT    NOT NULL UNIQUE,
+    content_type   TEXT    NOT NULL CHECK (content_type IN ('image/jpeg', 'image/png', 'application/pdf')),
+    file_size      INTEGER NOT NULL CHECK (file_size > 0 AND file_size <= 10485760),
+    created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS ix_transactions_family_date
     ON transactions (family_id, occurred_on DESC);
 
@@ -53,6 +66,9 @@ CREATE INDEX IF NOT EXISTS ix_transactions_category
 
 CREATE INDEX IF NOT EXISTS ix_users_family
     ON users (family_id);
+
+CREATE INDEX IF NOT EXISTS ix_receipts_transaction
+    ON receipts (transaction_id);
 
 -- Same compatibility view as in schema_postgres.sql.
 CREATE VIEW IF NOT EXISTS user_balance AS

@@ -12,19 +12,28 @@ With PostgreSQL:
 from __future__ import annotations
 
 import html
+import os
+import uuid
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
+# Streamlit Community Cloud passes configuration through st.secrets, not through
+# environment variables. Promote the secret before settings are read.
+try:  # pragma: no cover - only runs on Streamlit Cloud
+    if not os.getenv("DATABASE_URL") and "DATABASE_URL" in st.secrets:
+        os.environ["DATABASE_URL"] = str(st.secrets["DATABASE_URL"])
+except Exception:  # noqa: BLE001 - no secrets file locally
+    pass
+
 from core.config import load_settings
 from core.db import Database
 from core.export import transactions_to_csv
 from core.presentation import budget_rows_html, trend_html
-from receipt_feature.service import (
-    ReceiptError, attach_receipt, delete_receipt, list_receipts, read_receipt,
-)
+from core.report import monthly_report_csv
 from core.services import (
     AccessDenied,
     AuthError,
@@ -35,6 +44,9 @@ from core.services import (
 from core.validators import ValidationError, add_months, format_money, month_bounds
 
 settings = load_settings()
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+RECEIPT_DIR = PROJECT_ROOT / "data" / "receipts"
 
 PAGE_ICON = "💰"
 NAV_ITEMS = [
@@ -325,6 +337,13 @@ def render_dashboard(svc: BudgetService, user: dict[str, Any]) -> None:
         f"income {money(lifetime['income_cents'])} / expenses {money(lifetime['expense_cents'])}"
     )
 
+    st.download_button(
+        "Download monthly report (CSV)",
+        data=monthly_report_csv(summary, budgets, settings.currency),
+        file_name=f"family-budget-report-{year:04d}-{month:02d}.csv",
+        mime="text/csv",
+    )
+
     left, right = st.columns([1, 1], gap="large")
     with left, st.container(border=True):
         st.markdown("#### Category budgets")
@@ -395,17 +414,42 @@ def render_add_transaction(svc: BudgetService, user: dict[str, Any]) -> None:
                 note = st.text_input(
                     "Note (optional)", placeholder="Magnum, weekly groceries", max_chars=280, key=f"note_{version}"
                 )
+                receipt = st.file_uploader(
+                    "Receipt file (optional: JPEG, PNG or PDF, up to 10 MB)",
+                    type=["png", "jpg", "jpeg", "pdf"],
+                    key=f"receipt_{version}",
+                )
                 submitted = st.form_submit_button("Save transaction", type="primary", use_container_width=True)
 
         if submitted:
             try:
-                svc.add_transaction(user, kind, amount, category_id, occurred, note)
+                transaction_id = svc.add_transaction(user, kind, amount, category_id, occurred, note)
+                if receipt is not None:
+                    data = receipt.getvalue()
+                    svc.validate_receipt(receipt.type, len(data), receipt.name)
+                    suffix = Path(receipt.name).suffix.lower() or ".bin"
+                    stored = f"{uuid.uuid4().hex}{suffix}"
+                    RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+                    target = RECEIPT_DIR / stored
+                    target.write_bytes(data)
+                    svc.add_receipt(
+                        user,
+                        transaction_id,
+                        receipt.name,
+                        str(target.relative_to(PROJECT_ROOT)),
+                        receipt.type,
+                        len(data),
+                    )
             except ValidationError as exc:
                 st.error(exc.message)
+                if "transaction_id" in locals():
+                    st.caption("The transaction itself was saved; only the receipt was not attached.")
+                    st.session_state["tx_version"] = version + 1
             else:
                 st.session_state["tx_version"] = version + 1
                 selected = next((c["name"] for c in pool if c["id"] == category_id), "category")
-                flash("success", f"Saved {kind} of {money(int(round(amount * 100)))} in {selected}.")
+                suffix = " with a receipt" if receipt is not None else ""
+                flash("success", f"Saved {kind} of {money(int(round(amount * 100)))} in {selected}{suffix}.")
                 st.rerun()
 
     with right:
@@ -481,68 +525,40 @@ def render_history(svc: BudgetService, user: dict[str, Any]) -> None:
                 "Category": row["category"],
                 "Member": row["member"],
                 "Amount": money(row["amount_cents"]),
+                "Receipt": "📎" if row.get("has_receipt") else "—",
                 "Note": row["note"],
             }
             for row in rows
         ]
     )
     st.dataframe(table, use_container_width=True, hide_index=True, height=380)
-    st.markdown("### Receipts")
-    expense_rows = [r for r in rows if r["kind"] == "expense"]
-    if not expense_rows:
-        st.caption("There are no expenses in the current filtered history.")
-    else:
-        expense_options = {
-            f'{r["code"]} · {full_date(r["occurred_on"])} · {r["category"]} · {money(r["amount_cents"])}': r["id"]
-            for r in expense_rows
-        }
-        chosen_label = st.selectbox("Choose an expense", list(expense_options), key="receipt_expense_choice")
-        chosen_transaction_id = expense_options[chosen_label]
 
-        uploaded = st.file_uploader(
-            "Attach receipt (JPG, PNG or PDF; max 10 MB)",
-            type=["jpg", "jpeg", "png", "pdf"],
-            key=f"receipt_upload_{chosen_transaction_id}",
-        )
-        if st.button("Attach file", key=f"attach_receipt_{chosen_transaction_id}", disabled=uploaded is None):
-            try:
-                attach_receipt(svc.db, user, chosen_transaction_id, uploaded)
-            except ReceiptError as exc:
-                st.error(str(exc))
-            except Exception as exc:
-                st.error(f"Could not save receipt: {exc}")
-            else:
-                st.success("Receipt attached successfully.")
-                st.rerun()
-
-        try:
-            attached_receipts = list_receipts(svc.db, user, chosen_transaction_id)
-        except ReceiptError as exc:
-            st.error(str(exc))
-            attached_receipts = []
-
-        if attached_receipts:
-            st.markdown("#### Attached files")
-            for receipt in attached_receipts:
-                with st.container(border=True):
-                    st.write(f'**{receipt["original_name"]}** · {receipt["file_size"]:,} bytes')
-                    try:
-                        original_name, content_type, file_bytes = read_receipt(svc.db, user, receipt["id"])
-                        if content_type.startswith("image/"):
-                            st.image(file_bytes, caption=original_name, use_container_width=True)
-                        st.download_button(
-                            "Open / download receipt",
-                            data=file_bytes,
-                            file_name=original_name,
-                            mime=content_type,
-                            key=f'download_receipt_{receipt["id"]}',
-                        )
-                        if st.button("Delete receipt", key=f'delete_receipt_{receipt["id"]}'):
-                            delete_receipt(svc.db, user, receipt["id"])
-                            st.success("Receipt deleted.")
-                            st.rerun()
-                    except ReceiptError as exc:
-                        st.error(str(exc))
+    with_receipts = [row for row in rows if row.get("has_receipt")]
+    if with_receipts:
+        with st.expander("View a receipt"):
+            labels = {
+                f'{row["code"]} · {full_date(row["occurred_on"])} · {money(row["amount_cents"])}': row["id"]
+                for row in with_receipts
+            }
+            choice = st.selectbox("Transaction", list(labels), label_visibility="collapsed")
+            attachments = svc.receipts_for(user["family_id"], labels[choice])
+            if attachments:
+                record = attachments[0]
+                path = PROJECT_ROOT / record["stored_name"]
+                if not path.exists():
+                    st.caption("The file is missing on disk.")
+                elif record["content_type"] == "application/pdf":
+                    st.download_button(
+                        "Open the PDF receipt",
+                        data=path.read_bytes(),
+                        file_name=record["original_name"],
+                        mime="application/pdf",
+                    )
+                else:
+                    st.image(str(path), width=380)
+                st.caption(
+                    f'{record["original_name"]} · {record["content_type"]} · {record["file_size"] / 1024:.0f} KB'
+                )
 
     dl, manage = st.columns([1, 1.4])
     dl.download_button(

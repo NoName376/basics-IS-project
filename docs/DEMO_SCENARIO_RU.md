@@ -14,7 +14,7 @@
    ```
    CHECK.bat
    ```
-   Должно быть `34 tests OK` и `10/10 checks passed`.
+   Должно быть `43 tests OK` и `10/10 checks passed`.
 4. Запуск:
    ```
    START.bat
@@ -113,7 +113,7 @@ TC-T-29, я починил: сервис перечитывает пользов
 | `connection refused` | Служба PostgreSQL не запущена: `services.msc` → `postgresql-x64-18` → Запустить |
 | `password authentication failed` | Пароль в `postgres_url.txt` не тот; текущий — `postgres` |
 | Порт 8501 занят | `python -m streamlit run app.py --server.port 8502` |
-| Приложение не стартует | Запусти `CHECK.bat`: 34 теста + 10 проверок — это тоже доказательство |
+| Приложение не стартует | Запусти `CHECK.bat`: 43 теста + 10 проверок — это тоже доказательство |
 | Данные «поплыли» после репетиции | `set /p DATABASE_URL=<postgres_url.txt` затем `python seed_demo.py --reset` |
 | Показываешь на другом ноутбуке | Скопируй папку, поставь PostgreSQL, `SETUP_POSTGRES.bat`, `START.bat` |
 

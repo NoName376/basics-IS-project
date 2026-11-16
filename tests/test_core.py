@@ -20,8 +20,9 @@ TMP_ROOT = Path(__file__).resolve().parent / "_tmp"
 from core.db import Database
 from core.export import transactions_to_csv
 from core.presentation import budget_rows_html, trend_html
+from core.report import monthly_report_csv
 from core.security import hash_password, is_valid_email, normalize_email, verify_password
-from core.services import AccessDenied, AuthError, BudgetService, ConflictError
+from core.services import AccessDenied, AuthError, BudgetService, ConflictError, NotFound
 from core.validators import ValidationError, format_money, month_bounds, parse_amount, parse_date
 
 
@@ -323,6 +324,77 @@ class TestExport(unittest.TestCase):
     def test_csv_of_empty_selection(self):
         text = transactions_to_csv([]).decode("utf-8-sig").strip().splitlines()
         self.assertEqual(len(text), 1)
+
+
+class TestReceipts(BaseCase):
+    def test_attach_receipt_and_flag(self):
+        tx = self.add("Food", 1000)
+        receipt_id = self.svc.add_receipt(self.admin, tx, "receipt.jpg", "data/receipts/a.jpg", "image/jpeg", 1024)
+        self.assertGreater(receipt_id, 0)
+        rows = self.svc.list_transactions(self.admin["family_id"])
+        self.assertTrue(rows[0]["has_receipt"])
+        stored = self.svc.receipts_for(self.admin["family_id"], tx)
+        self.assertEqual(stored[0]["content_type"], "image/jpeg")
+        self.assertEqual(int(stored[0]["file_size"]), 1024)
+        self.assertEqual(stored[0]["original_name"], "receipt.jpg")
+
+    def test_without_receipt_the_flag_is_false(self):
+        self.add("Food", 1000)
+        rows = self.svc.list_transactions(self.admin["family_id"])
+        self.assertFalse(rows[0]["has_receipt"])
+        self.assertEqual(self.svc.receipts_for(self.admin["family_id"], rows[0]["id"]), [])
+
+    def test_pdf_receipt_is_accepted(self):
+        tx = self.add("Food", 1000)
+        receipt_id = self.svc.add_receipt(self.admin, tx, "scan.pdf", "data/receipts/a.pdf", "application/pdf", 4096)
+        self.assertGreater(receipt_id, 0)
+        stored = self.svc.receipts_for(self.admin["family_id"], tx)
+        self.assertEqual(stored[0]["content_type"], "application/pdf")
+
+    def test_wrong_file_type_is_rejected(self):
+        tx = self.add("Food", 1000)
+        with self.assertRaises(ValidationError):
+            self.svc.add_receipt(self.admin, tx, "scan.txt", "data/receipts/a.txt", "text/plain", 1024)
+
+    def test_oversized_file_is_rejected(self):
+        tx = self.add("Food", 1000)
+        with self.assertRaises(ValidationError):
+            self.svc.add_receipt(self.admin, tx, "big.jpg", "data/receipts/a.jpg", "image/jpeg", 11 * 1024 * 1024)
+
+    def test_receipt_for_another_family_is_rejected(self):
+        other = self.svc.register_family("Other Family", "Stranger", "stranger@test.kz", "Secret123")
+        other_cats = {c["name"]: c for c in self.svc.list_categories(other["family_id"])}
+        foreign_tx = self.svc.add_transaction(
+            other, "expense", 100, other_cats["Food"]["id"], date.today()
+        )
+        with self.assertRaises(NotFound):
+            self.svc.add_receipt(self.admin, foreign_tx, "receipt.jpg", "data/receipts/a.jpg", "image/jpeg", 1024)
+
+    def test_deleting_a_transaction_deletes_its_receipt(self):
+        tx = self.add("Food", 1000)
+        self.svc.add_receipt(self.admin, tx, "receipt.jpg", "data/receipts/a.jpg", "image/jpeg", 1024)
+        self.svc.delete_transaction(self.admin, tx)
+        self.assertEqual(self.svc.receipts_for(self.admin["family_id"], tx), [])
+
+
+class TestReport(BaseCase):
+    def test_monthly_report_contains_totals_and_budgets(self):
+        self.add("Food", 2500)
+        month = self.svc.month_summary(self.admin["family_id"], date.today().year, date.today().month)
+        budgets = self.svc.budget_status(self.admin["family_id"], date.today().year, date.today().month)
+        text = monthly_report_csv(month, budgets, "KZT").decode("utf-8-sig")
+        self.assertIn("Family Budget Tracker", text)
+        self.assertIn(month["label"], text)
+        self.assertIn("2500.00", text)
+        self.assertIn("Food", text)
+        self.assertIn("within limit", text)
+
+    def test_report_marks_an_over_budget_category(self):
+        self.add("Food", 160_000)  # limit is 150 000
+        month = self.svc.month_summary(self.admin["family_id"], date.today().year, date.today().month)
+        budgets = self.svc.budget_status(self.admin["family_id"], date.today().year, date.today().month)
+        text = monthly_report_csv(month, budgets, "KZT").decode("utf-8-sig")
+        self.assertIn("over limit", text)
 
 
 if __name__ == "__main__":
